@@ -1,0 +1,112 @@
+//! Abstract Syntax Tree for Starlark source code.
+
+/// Reference to externally-owned data.
+source: [:0]const u8,
+
+tokens: TokenList.Slice,
+/// The root AST node is assumed to be index 0. Since there can be no
+/// references to the root node, this means 0 is available to indicate null.
+nodes: NodeList.Slice,
+extra_data: []Node.Index,
+errors: []const Error,
+
+const std = @import("std");
+const assert = std.debug.assert;
+const testing = std.testing;
+const mem = std.mem;
+const syntax = @import("./syntax.zig");
+const Token = syntax.Token;
+const Ast = @This();
+
+pub const TokenIndex = u32;
+pub const ByteOffset = u32;
+
+pub const TokenList = std.MultiArrayList(struct {
+    tag: Token.Tag,
+    start: ByteOffset,
+});
+pub const NodeList = std.MultiArrayList(Node);
+
+pub const Location = struct {
+    line: usize,
+    column: usize,
+    line_start: usize,
+    line_end: usize,
+};
+
+pub fn deinit(tree: *Ast, gpa: mem.Allocator) void {
+    tree.tokens.deinit(gpa);
+    tree.nodes.deinit(gpa);
+    gpa.free(tree.extra_data);
+    gpa.free(tree.errors);
+    tree.* = undefined;
+}
+
+pub fn tokenLocation(self: Ast, start_offset: ByteOffset, token_index: TokenIndex) Location {
+    var loc = Location{
+        .line = 0,
+        .column = 0,
+        .line_start = start_offset,
+        .line_end = self.source.len,
+    };
+    const token_start = self.tokens.items(.start)[token_index];
+    for (self.source[start_offset..]) |c, i| {
+        if (i + start_offset == token_start) {
+            loc.line_end = i + start_offset;
+            while (loc.line_end < self.source.len and self.source[loc.line_end] != '\n') {
+                loc.line_end += 1;
+            }
+            return loc;
+        }
+        if (c == '\n') {
+            loc.line += 1;
+            loc.column = 0;
+            loc.line_start = i + 1;
+        } else {
+            loc.column += 1;
+        }
+    }
+    return loc;
+}
+
+pub const Error = struct {
+    tag: Tag,
+    is_note: bool = false,
+    /// True if `token` points to the token before the token causing an issue.
+    token_is_prev: bool = false,
+    token: TokenIndex,
+    extra: union {
+        none: void,
+        expected_tag: Token.Tag,
+    } = .{ .none = {} },
+
+    pub const Tag = enum {
+
+        /// `expected_tag` is populated.
+        expected_token,
+    };
+};
+
+pub const Node = struct {
+    tag: Tag,
+    main_token: TokenIndex,
+    data: Data,
+
+    pub const Index = u32;
+
+    comptime {
+        // Goal is to keep this under one byte for efficiency.
+        assert(@sizeOf(Tag) == 1);
+    }
+
+    /// Note: The FooComma/FooSemicolon variants exist to ease the implementation of
+    /// Ast.lastToken()
+    pub const Tag = enum {
+        root,
+    };
+
+    pub const Data = struct {
+        lhs: Index,
+        rhs: Index,
+    };
+};
