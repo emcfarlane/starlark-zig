@@ -1,5 +1,7 @@
 const std = @import("std");
+const ArrayList = std.ArrayList;
 const mem = std.mem;
+const Allocator = std.mem.Allocator;
 
 pub const Token = struct {
     tag: Tag,
@@ -40,7 +42,7 @@ pub const Token = struct {
 
         newline,
         indent,
-        outdent,
+        dedent,
 
         // TOKENS WITH VALUES
         ident, // X
@@ -48,6 +50,7 @@ pub const Token = struct {
         float, // 1.23E45
         string, // "FOO" OR 'FOO' OR '''FOO''' OR R'FOO' OR R"FOO"
         bytes, // B"FOO", ETC
+        //comment, // #
 
         // PUNCTUATION
         plus, // +
@@ -117,7 +120,7 @@ pub const Token = struct {
                 .eof,
                 .newline,
                 .indent,
-                .outdent,
+                .dedent,
                 .ident,
                 .int,
                 .float,
@@ -188,11 +191,11 @@ pub const Token = struct {
 
         pub fn symbol(tag: Tag) []const u8 {
             return tag.lexeme() orelse switch (tag) {
-                .invalid => "illegal ",
+                .invalid => "invalid ",
                 .eof => "eof",
                 .newline => "newline",
                 .indent => "indent",
-                .outdent => "outdent",
+                .dedent => "dedent",
                 .ident => "ident",
                 .int => "int",
                 .float => "float",
@@ -209,23 +212,40 @@ pub const Tokenizer = struct {
     index: usize,
     pending_invalid_token: ?Token,
 
+    line_start: bool, // // after NEWLINE; convert spaces to indentation tokens
+    depth: usize, // nesting of [ ] { } ( )
+    dents: isize, // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
+    levels: std.ArrayList(isize), // stack of indentation levels
+
     /// For debugging purposes
     pub fn dump(self: *Tokenizer, token: *const Token) void {
         std.debug.print("{s} \"{s}\"\n", .{ @tagName(token.tag), self.buffer[token.loc.start..token.loc.end] });
     }
 
-    pub fn init(buffer: [:0]const u8) Tokenizer {
+    pub fn init(gpa: Allocator, buffer: [:0]const u8) Allocator.Error!Tokenizer {
         // Skip the UTF-8 BOM if present
         const src_start = if (mem.startsWith(u8, buffer, "\xEF\xBB\xBF")) 3 else @as(usize, 0);
+        var levels = try ArrayList(isize).initCapacity(gpa, 10);
+        try levels.append(0);
+
         return Tokenizer{
             .buffer = buffer,
             .index = src_start,
             .pending_invalid_token = null,
+            .line_start = true,
+            .depth = 0,
+            .dents = 0,
+            .levels = levels,
         };
+    }
+
+    pub fn deinit(self: *Tokenizer) void {
+        self.levels.deinit();
     }
 
     const State = enum {
         start,
+        line_start,
         ident,
         ident_1, // could be string literal.
         string,
@@ -248,7 +268,7 @@ pub const Tokenizer = struct {
         gtgt,
         eq,
 
-        // Zig numbers
+        // Zig numbers TODO: pythonify
         zero,
         int_dec,
         int_dec_no_underscore,
@@ -269,7 +289,7 @@ pub const Tokenizer = struct {
         float_exponent_num_no_underscore,
     };
 
-    pub fn next(self: *Tokenizer) Token {
+    pub fn next(self: *Tokenizer) Allocator.Error!Token {
         if (self.pending_invalid_token) |token| {
             self.pending_invalid_token = null;
             return token;
@@ -282,15 +302,38 @@ pub const Tokenizer = struct {
                 .end = undefined,
             },
         };
+        var col: isize = 0;
+
+        if (self.line_start) {
+            state = .line_start;
+        }
+
         //var seen_escape_digits: usize = undefined;
         //var remaining_code_units: usize = undefined;
-        while (true) : (self.index += 1) {
+        while (true) {
+            if (self.dents != 0) {
+                if (self.dents > 0) {
+                    self.dents -= 1;
+                    result.tag = .indent;
+                } else {
+                    self.dents += 1;
+                    result.tag = .dedent;
+                }
+                break;
+            }
+
             const c = self.buffer[self.index];
             switch (state) {
                 .start => switch (c) {
                     0 => break,
-                    ' ', '\n', '\t', '\r' => {
-                        result.loc.start = self.index + 1;
+                    ' ', '\t' => {
+                        result.loc.start = self.index + 1; // ignore
+                    },
+                    '\n', '\r' => {
+                        self.line_start = true;
+                        result.tag = .newline;
+                        self.index += 1;
+                        break;
                     },
                     '"' => {
                         state = .string;
@@ -368,31 +411,49 @@ pub const Tokenizer = struct {
                         break;
                     },
                     '(' => {
+                        self.depth += 1;
                         result.tag = .lparen;
                         self.index += 1;
                         break;
                     },
                     ')' => {
+                        if (self.depth == 0) {
+                            result.tag = .invalid;
+                            break;
+                        }
+                        self.depth -= 1;
                         result.tag = .rparen;
                         self.index += 1;
                         break;
                     },
                     '[' => {
+                        self.depth += 1;
                         result.tag = .lbrack;
                         self.index += 1;
                         break;
                     },
                     ']' => {
+                        if (self.depth == 0) {
+                            result.tag = .invalid;
+                            break;
+                        }
+                        self.depth -= 1;
                         result.tag = .rbrack;
                         self.index += 1;
                         break;
                     },
                     '{' => {
+                        self.depth += 1;
                         result.tag = .lbrace;
                         self.index += 1;
                         break;
                     },
                     '}' => {
+                        if (self.depth == 0) {
+                            result.tag = .invalid;
+                            break;
+                        }
+                        self.depth -= 1;
                         result.tag = .rbrace;
                         self.index += 1;
                         break;
@@ -402,6 +463,54 @@ pub const Tokenizer = struct {
                         result.loc.end = self.index;
                         self.index += 1;
                         return result;
+                    },
+                },
+
+                .line_start => switch (c) {
+                    ' ' => {
+                        result.loc.start = self.index + 1; // ignore
+                        col += 1;
+                    },
+                    '\t' => {
+                        result.loc.start = self.index + 1; // ignore
+                        const tab = 8;
+                        col += tab - @rem(col, tab); // col % tab;
+                    },
+                    '\n', '\r' => {
+                        result.loc.start = self.index;
+                        self.line_start = true;
+                        result.tag = .newline;
+                        self.index += 1;
+                        break;
+                    },
+                    else => {
+                        // non blank line
+                        self.line_start = false;
+                        state = .start;
+
+                        // Compute indentation level for non-blank lines not
+                        // inside an expression.  This is not the common case.
+                        var l = self.levels.items.len;
+                        if (self.depth == 0) {
+                            var cur = self.levels.items[l - 1];
+                            if (col > cur) {
+                                self.dents += 1;
+                                try self.levels.append(col);
+                            } else { // if (col < cur)  {
+                                while (l > 0 and col < cur) {
+                                    self.dents -= 1;
+                                    self.levels.items.len -= 1;
+                                    l -= 1;
+                                    cur = self.levels.items[l - 1];
+                                }
+                                if (col != cur) {
+                                    result.tag = .invalid;
+                                    break;
+                                }
+                            }
+                        }
+                        // reinterpret as starting value.
+                        continue;
                     },
                 },
 
@@ -900,6 +1009,7 @@ pub const Tokenizer = struct {
                     else => break,
                 },
             }
+            self.index += 1; // use continue to skip
         }
 
         if (result.tag == .eof) {
@@ -911,6 +1021,7 @@ pub const Tokenizer = struct {
         }
 
         result.loc.end = self.index;
+        self.dump(&result);
         return result;
     }
 
@@ -965,7 +1076,7 @@ pub const Tokenizer = struct {
     }
 };
 
-test "tokenizer" {
+test "tokenizer keyword" {
     try testTokenize("pass", &.{.keyword_pass});
 }
 
@@ -979,7 +1090,72 @@ test "function definition pass" {
         .lparen,
         .rparen,
         .colon,
+        .newline,
+        .indent,
         .keyword_pass,
+    });
+}
+
+test "embeded function definition pass" {
+    try testTokenize(
+        \\def outer():
+        \\    def inner():
+        \\        pass
+        \\
+        \\    inner()
+        \\outer()
+    , &.{
+        // first
+        .keyword_def,
+        .ident,
+        .lparen,
+        .rparen,
+        .colon,
+        .newline,
+        .indent,
+
+        // second
+        .keyword_def,
+        .ident,
+        .lparen,
+        .rparen,
+        .colon,
+        .newline,
+        .indent,
+        .keyword_pass,
+        .newline,
+        .newline,
+
+        // call inner
+        .dedent,
+        .ident,
+        .lparen,
+        .rparen,
+        .newline,
+
+        // call outer
+        .dedent,
+        .ident,
+        .lparen,
+        .rparen,
+    });
+}
+
+test "multiline expression" {
+    try testTokenize(
+        \\[
+        \\  1,
+        \\      2
+        \\  ]
+    , &.{
+        .lbrack,
+        .newline,
+        .int,
+        .comma,
+        .newline,
+        .int,
+        .newline,
+        .rbrack,
     });
 }
 
@@ -1002,16 +1178,18 @@ test "tokenizer code point literal with unicode code point" {
 }
 
 fn testTokenize(source: [:0]const u8, expected_tokens: []const Token.Tag) !void {
-    var tokenizer = Tokenizer.init(source);
+    const tgpa = std.testing.allocator;
+    var tokenizer = try Tokenizer.init(tgpa, source);
+    defer tokenizer.deinit();
     for (expected_tokens) |expected_token_id| {
-        const token = tokenizer.next();
+        const token = try tokenizer.next();
         if (token.tag != expected_token_id) {
             std.debug.panic("expected {s}, found {s}\n", .{
                 @tagName(expected_token_id), @tagName(token.tag),
             });
         }
     }
-    const last_token = tokenizer.next();
+    const last_token = try tokenizer.next();
     try std.testing.expectEqual(Token.Tag.eof, last_token.tag);
     try std.testing.expectEqual(source.len, last_token.loc.start);
 }
