@@ -21,18 +21,15 @@ const Ast = @This();
 pub const TokenIndex = u32;
 pub const ByteOffset = u32;
 
-pub const TokenList = std.MultiArrayList(struct {
-    tag: Token.Tag,
-    start: ByteOffset,
-});
+pub const TokenList = std.MultiArrayList(Token);
 pub const NodeList = std.MultiArrayList(Node);
 
-pub const Location = struct {
-    line: usize,
-    column: usize,
-    line_start: usize,
-    line_end: usize,
-};
+//pub const Location = struct {
+//    line: usize,
+//    column: usize,
+//    line_start: usize,
+//    line_end: usize,
+//};
 
 pub fn deinit(tree: *Ast, gpa: mem.Allocator) void {
     tree.tokens.deinit(gpa);
@@ -42,32 +39,39 @@ pub fn deinit(tree: *Ast, gpa: mem.Allocator) void {
     tree.* = undefined;
 }
 
-pub fn tokenLocation(self: Ast, start_offset: ByteOffset, token_index: TokenIndex) Location {
-    var loc = Location{
-        .line = 0,
-        .column = 0,
-        .line_start = start_offset,
-        .line_end = self.source.len,
-    };
-    const token_start = self.tokens.items(.start)[token_index];
-    for (self.source[start_offset..]) |c, i| {
-        if (i + start_offset == token_start) {
-            loc.line_end = i + start_offset;
-            while (loc.line_end < self.source.len and self.source[loc.line_end] != '\n') {
-                loc.line_end += 1;
-            }
-            return loc;
-        }
-        if (c == '\n') {
-            loc.line += 1;
-            loc.column = 0;
-            loc.line_start = i + 1;
-        } else {
-            loc.column += 1;
-        }
-    }
-    return loc;
+// rootDecls returns the list of root nodes.
+pub fn rootDecls(tree: Ast) []const Node.Index {
+    // Root is always index 0.
+    const nodes_data = tree.nodes.items(.data);
+    return tree.extra_data[nodes_data[0].lhs..nodes_data[0].rhs];
 }
+
+//pub fn tokenLocation(self: Ast, start_offset: ByteOffset, token_index: TokenIndex) Location {
+//    var loc = Location{
+//        .line = 0,
+//        .column = 0,
+//        .line_start = start_offset,
+//        .line_end = self.source.len,
+//    };
+//    const token_start = self.tokens.items(.start)[token_index];
+//    for (self.source[start_offset..]) |c, i| {
+//        if (i + start_offset == token_start) {
+//            loc.line_end = i + start_offset;
+//            while (loc.line_end < self.source.len and self.source[loc.line_end] != '\n') {
+//                loc.line_end += 1;
+//            }
+//            return loc;
+//        }
+//        if (c == '\n') {
+//            loc.line += 1;
+//            loc.column = 0;
+//            loc.line_start = i + 1;
+//        } else {
+//            loc.column += 1;
+//        }
+//    }
+//    return loc;
+//}
 
 pub const Error = struct {
     tag: Tag,
@@ -84,6 +88,9 @@ pub const Error = struct {
 
         /// `expected_tag` is populated.
         expected_token,
+        expected_primary_expr,
+        unexpected_trailing_comma,
+        unexpected_associate,
     };
 };
 
@@ -102,11 +109,62 @@ pub const Node = struct {
     /// Note: The FooComma/FooSemicolon variants exist to ease the implementation of
     /// Ast.lastToken()
     pub const Tag = enum {
+        /// sub_list[lhs...rhs]
         root,
+
+        assignment_stmt,
+        branch_stmt,
+        def_stmt,
+        if_stmt,
+        return_stmt,
+        simple_stmt,
+
+        binary_expr,
+        cond_expr,
+        expr,
+        lambda_expr,
+        paren_expr,
+        tuple_expr,
+        unary_expr,
+
+        dot,
+        ident,
+        literal,
+        params,
     };
 
     pub const Data = struct {
         lhs: Index,
         rhs: Index,
+    };
+
+    pub const SubRange = struct {
+        /// Index into sub_list.
+        start: Index,
+        /// Index into sub_list.
+        end: Index,
+    };
+
+    pub const IfStmt = struct {
+        then_expr: Index,
+        else_expr: Index,
+    };
+
+    pub const CondExpr = struct {
+        then_expr: Index,
+        else_expr: Index,
+    };
+
+    pub const DefStmt = struct {
+        params_start: Index,
+        params_end: Index,
+        /// Populated if align(A) is present.
+        align_expr: Index,
+        /// Populated if addrspace(A) is present.
+        addrspace_expr: Index,
+        /// Populated if linksection(A) is present.
+        section_expr: Index,
+        /// Populated if callconv(A) is present.
+        callconv_expr: Index,
     };
 };

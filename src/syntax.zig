@@ -1,7 +1,7 @@
 const std = @import("std");
 const ArrayList = std.ArrayList;
 const mem = std.mem;
-const Allocator = std.mem.Allocator;
+const Allocator = mem.Allocator;
 
 pub const Token = struct {
     tag: Tag,
@@ -539,12 +539,7 @@ pub const Tokenizer = struct {
                     'a'...'z', 'A'...'Z', '_', '0'...'9' => {
                         state = .ident;
                     },
-                    else => {
-                        if (Token.getKeyword(self.buffer[result.loc.start..self.index])) |tag| {
-                            result.tag = tag;
-                        }
-                        break;
-                    },
+                    else => break,
                 },
 
                 .plus => switch (c) {
